@@ -67,18 +67,6 @@ class DataManager {
    public:
     using TimePoint = std::chrono::time_point<std::chrono::steady_clock>;
 
-    struct PreWriteResult {
-        RemoteBufferDesc remote_buffer;
-        uint64_t deadline_ms = 0;
-        UUID pending_write_token{0, 0};
-    };
-
-    struct PinKeyResult {
-        RemoteBufferDesc remote_buffer;
-        uint64_t deadline_ms = 0;
-        UUID pin_token{0, 0};
-    };
-
     /**
      * @brief Constructor
      * @param tiered_backend Unique pointer to TieredBackend instance (takes
@@ -202,14 +190,14 @@ class DataManager {
         std::string_view key, const std::vector<RemoteBufferDesc>& src_buffers,
         std::optional<UUID> tier_id = std::nullopt);
 
-    tl::expected<PreWriteResult, ErrorCode> PreWrite(
+    tl::expected<PreWriteResponse, ErrorCode> PreWrite(
         std::string_view key, size_t size_bytes,
         std::optional<UUID> tier_id = std::nullopt);
 
     tl::expected<void, ErrorCode> WriteCommit(std::string_view key,
                                               const UUID& pending_write_token);
 
-    tl::expected<PinKeyResult, ErrorCode> PinKey(
+    tl::expected<PinKeyResponse, ErrorCode> PinKey(
         std::string_view key, std::optional<UUID> tier_id = std::nullopt);
 
     tl::expected<void, ErrorCode> UnPinKey(std::string_view key,
@@ -259,11 +247,12 @@ class DataManager {
     PendingWriteShard& GetPendingWriteShard(const KeyCtx& ctx);
     PinnedKeyShard& GetPinnedKeyShard(const KeyCtx& ctx);
 
-    tl::expected<PreWriteResult, ErrorCode> PreWriteInternal(
-        const KeyCtx& ctx, size_t size_bytes, std::optional<UUID> tier_id);
+    tl::expected<PreWriteResponse, ErrorCode> PreWriteInternal(
+        const KeyCtx& ctx, size_t size_bytes, std::optional<UUID> tier_id,
+        bool enforce_dram_allocation);
     tl::expected<void, ErrorCode> WriteCommitInternal(
         const KeyCtx& ctx, const UUID& pending_write_token);
-    tl::expected<PinKeyResult, ErrorCode> PinKeyInternal(
+    tl::expected<PinKeyResponse, ErrorCode> PinKeyInternal(
         const KeyCtx& ctx, std::optional<UUID> tier_id);
     tl::expected<void, ErrorCode> UnPinKeyInternal(const KeyCtx& ctx,
                                                    const UUID& pin_token);
@@ -459,8 +448,6 @@ class DataManager {
     const std::chrono::milliseconds& lease_duration() const {
         return lease_duration_;
     }
-    uint64_t TimePointToDeadlineMs(TimePoint deadline) const;
-    TimePoint DeadlineMsToTimePoint(uint64_t deadline_ms) const;
     bool IsExpired(TimePoint deadline) const;
     RemoteBufferDesc BuildRemoteBufferDesc(
         const AllocationHandle& handle) const;

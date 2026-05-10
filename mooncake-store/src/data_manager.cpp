@@ -231,31 +231,6 @@ DataManager::PinnedKeyShard& DataManager::GetPinnedKeyShard(
     return pinned_key_shards_[HashKey(key) % pinned_key_shards_.size()];
 }
 
-uint64_t DataManager::TimePointToDeadlineMs(TimePoint deadline) const {
-    const auto remaining =
-        std::max(std::chrono::milliseconds::zero(),
-                 std::chrono::duration_cast<std::chrono::milliseconds>(
-                     deadline - std::chrono::steady_clock::now()));
-    const auto system_deadline = std::chrono::system_clock::now() + remaining;
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            system_deadline.time_since_epoch())
-            .count());
-}
-
-DataManager::TimePoint DataManager::DeadlineMsToTimePoint(
-    uint64_t deadline_ms) const {
-    const auto system_deadline = std::chrono::system_clock::time_point(
-        std::chrono::milliseconds(static_cast<int64_t>(deadline_ms)));
-    const auto remaining =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            system_deadline - std::chrono::system_clock::now());
-    if (remaining <= std::chrono::milliseconds::zero()) {
-        return std::chrono::steady_clock::now();
-    }
-    return std::chrono::steady_clock::now() + remaining;
-}
-
 bool DataManager::IsExpired(TimePoint deadline) const {
     return deadline <= std::chrono::steady_clock::now();
 }
@@ -518,7 +493,9 @@ DataManager::PutViaTe(std::string_view key, std::vector<Slice>& slices) {
         return tl::unexpected(validate_result.error());
     }
 
-    auto prewrite_result = PreWriteInternal(kctx, total_size, std::nullopt);
+    // Local Put: allocation follows tier backend policy (not restricted to DRAM).
+    auto prewrite_result =
+        PreWriteInternal(kctx, total_size, std::nullopt, false);
     if (!prewrite_result) {
         return tl::unexpected(prewrite_result.error());
     }
@@ -593,7 +570,9 @@ DataManager::PutViaMemcpy(std::string_view key, std::vector<Slice>& slices) {
     const KeyCtx kctx = BuildKeyCtx(key);
     Slice slice = slices[0];
 
-    auto prewrite_result = PreWriteInternal(kctx, slice.size, std::nullopt);
+    // Same allocation policy as PutViaTe.
+    auto prewrite_result =
+        PreWriteInternal(kctx, slice.size, std::nullopt, false);
     if (!prewrite_result) {
         return tl::unexpected(prewrite_result.error());
     }
@@ -886,8 +865,9 @@ tl::expected<UUID, ErrorCode> DataManager::WriteRemoteData(
     for (const auto& buf : src_buffers) total_size += buf.size;
 
     // Reverse RDMA path: still one RPC, but internally use the 3-phase write
-    // model (PreWrite -> transfer -> WriteCommit).
-    auto prewrite_result = PreWriteInternal(kctx, total_size, tier_id);
+    // model (PreWrite -> transfer -> WriteCommit). Target tier may be non-DRAM.
+    auto prewrite_result =
+        PreWriteInternal(kctx, total_size, tier_id, false);
     if (!prewrite_result) {
         timer.LogResponse("error_code=", prewrite_result.error());
         return tl::make_unexpected(prewrite_result.error());
@@ -923,14 +903,17 @@ tl::expected<UUID, ErrorCode> DataManager::WriteRemoteData(
     return result_tier_id;
 }
 
-tl::expected<DataManager::PreWriteResult, ErrorCode> DataManager::PreWrite(
+tl::expected<PreWriteResponse, ErrorCode> DataManager::PreWrite(
     std::string_view key, size_t size_bytes, std::optional<UUID> tier_id) {
-    return PreWriteInternal(BuildKeyCtx(key), size_bytes, tier_id);
+    // RPC PreWrite: forward path is wired for DRAM only for now; other tiers
+    // TODO (staging / TE registration).
+    return PreWriteInternal(BuildKeyCtx(key), size_bytes, tier_id, true);
 }
 
-tl::expected<DataManager::PreWriteResult, ErrorCode>
+tl::expected<PreWriteResponse, ErrorCode>
 DataManager::PreWriteInternal(const KeyCtx& ctx, size_t size_bytes,
-                              std::optional<UUID> tier_id) {
+                              std::optional<UUID> tier_id,
+                              bool enforce_dram_allocation) {
     ScopedVLogTimer timer(1, "DataManager::PreWrite");
     timer.LogRequest("key=", ctx.key, "size_bytes=", size_bytes);
 
@@ -963,6 +946,14 @@ DataManager::PreWriteInternal(const KeyCtx& ctx, size_t size_bytes,
     }
 
     auto handle = std::move(handle_result.value());
+    // When enforce_dram_allocation is true (RPC PreWrite): only DRAM is wired
+    // for forward TE today; non-DRAM tiers TODO. Local Put / WriteRemoteData use
+    // false and skip this check.
+    if (enforce_dram_allocation &&
+        handle->loc.data.type != MemoryType::DRAM) {
+        timer.LogResponse("error_code=", ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+        return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+    }
     auto list_it = shard.ordered_list.emplace(shard.ordered_list.end(),
                                               ctx.key_string, deadline);
 
@@ -974,12 +965,10 @@ DataManager::PreWriteInternal(const KeyCtx& ctx, size_t size_bytes,
     record.list_it = list_it;
     shard.by_key.insert_or_assign(ctx.key_string, std::move(record));
 
-    PreWriteResult result;
+    PreWriteResponse result;
     result.remote_buffer = BuildRemoteBufferDesc(handle);
-    result.deadline_ms = TimePointToDeadlineMs(deadline);
     result.pending_write_token = pending_write_token;
-    timer.LogResponse("error_code=", ErrorCode::OK,
-                      "deadline_ms=", result.deadline_ms);
+    timer.LogResponse("error_code=", ErrorCode::OK);
     return result;
 }
 
@@ -1045,12 +1034,12 @@ tl::expected<void, ErrorCode> DataManager::WriteCommitInternal(
     return {};
 }
 
-tl::expected<DataManager::PinKeyResult, ErrorCode> DataManager::PinKey(
+tl::expected<PinKeyResponse, ErrorCode> DataManager::PinKey(
     std::string_view key, std::optional<UUID> tier_id) {
     return PinKeyInternal(BuildKeyCtx(key), tier_id);
 }
 
-tl::expected<DataManager::PinKeyResult, ErrorCode> DataManager::PinKeyInternal(
+tl::expected<PinKeyResponse, ErrorCode> DataManager::PinKeyInternal(
     const KeyCtx& ctx, std::optional<UUID> tier_id) {
     ScopedVLogTimer timer(1, "DataManager::PinKey");
     timer.LogRequest("key=", ctx.key);
@@ -1070,14 +1059,19 @@ tl::expected<DataManager::PinKeyResult, ErrorCode> DataManager::PinKeyInternal(
     RemoveExpiredPinnedKeyLocked(shard, ctx.key_string, now);
     auto record_it = shard.by_key.find(ctx.key_string);
     if (record_it != shard.by_key.end()) {
+        // PinKey forward path: DRAM-only for now; non-DRAM replica handling TODO.
+        if (record_it->second.handle->loc.data.type != MemoryType::DRAM) {
+            timer.LogResponse("error_code=",
+                              ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+            return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+        }
         record_it->second.ref_count++;
         record_it->second.deadline = deadline;
         TouchOrderedDeadlineNode(shard.ordered_list, record_it->second.list_it,
                                  ctx.key_string, deadline);
 
-        PinKeyResult result;
+        PinKeyResponse result;
         result.remote_buffer = BuildRemoteBufferDesc(record_it->second.handle);
-        result.deadline_ms = TimePointToDeadlineMs(deadline);
         result.pin_token = record_it->second.pin_token;
         timer.LogResponse("error_code=", ErrorCode::OK,
                           "ref_count=", record_it->second.ref_count);
@@ -1091,6 +1085,11 @@ tl::expected<DataManager::PinKeyResult, ErrorCode> DataManager::PinKeyInternal(
     }
 
     auto handle = std::move(handle_result.value());
+    // PinKey forward path: DRAM-only for now; non-DRAM replica handling TODO.
+    if (handle->loc.data.type != MemoryType::DRAM) {
+        timer.LogResponse("error_code=", ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+        return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+    }
     auto list_it = shard.ordered_list.emplace(shard.ordered_list.end(),
                                               ctx.key_string, deadline);
 
@@ -1103,12 +1102,10 @@ tl::expected<DataManager::PinKeyResult, ErrorCode> DataManager::PinKeyInternal(
     record.list_it = list_it;
     shard.by_key.insert_or_assign(ctx.key_string, std::move(record));
 
-    PinKeyResult result;
+    PinKeyResponse result;
     result.remote_buffer = BuildRemoteBufferDesc(handle);
-    result.deadline_ms = TimePointToDeadlineMs(deadline);
     result.pin_token = pin_token_value;
-    timer.LogResponse("error_code=", ErrorCode::OK,
-                      "deadline_ms=", result.deadline_ms);
+    timer.LogResponse("error_code=", ErrorCode::OK);
     return result;
 }
 
