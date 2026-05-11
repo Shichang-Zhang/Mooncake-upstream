@@ -824,7 +824,7 @@ tl::expected<void, ErrorCode> RealClient::unregister_shm_buffer_internal(
 std::shared_ptr<BufferHandle> RealClient::get_buffer_internal(
     const std::string& key,
     std::shared_ptr<ClientBufferAllocator> client_buffer_allocator,
-    const ReadRouteConfig& config) {
+    const ReadConfigExt& config) {
     if (!client_service_) {
         LOG(ERROR) << "Client is not initialized";
         return nullptr;
@@ -848,12 +848,12 @@ std::shared_ptr<BufferHandle> RealClient::get_buffer_internal(
 
 // Implementation of get_buffer method
 std::shared_ptr<BufferHandle> RealClient::get_buffer(
-    const std::string& key, const ReadRouteConfig& config) {
+    const std::string& key, const ReadConfigExt& config) {
     return get_buffer_internal(key, client_buffer_allocator_, config);
 }
 
 std::tuple<uint64_t, size_t> RealClient::get_buffer_info(
-    const std::string& key, const ReadRouteConfig& config) {
+    const std::string& key, const ReadConfigExt& config) {
     auto buffer_handle =
         get_buffer_internal(key, client_buffer_allocator_, config);
     if (!buffer_handle) {
@@ -867,7 +867,7 @@ std::tuple<uint64_t, size_t> RealClient::get_buffer_info(
 
 tl::expected<std::tuple<uint64_t, size_t>, ErrorCode>
 RealClient::get_buffer_info_dummy_helper(const std::string& key,
-                                         const ReadRouteConfig& config,
+                                         const ReadConfigExt& config,
                                          const UUID& client_id) {
     std::shared_lock<std::shared_mutex> lock(dummy_client_mutex_);
     auto it = shm_contexts_.find(client_id);
@@ -905,7 +905,7 @@ RealClient::get_buffer_info_dummy_helper(const std::string& key,
 // Implementation of batch_get_buffer_internal method
 std::vector<std::shared_ptr<BufferHandle>>
 RealClient::batch_get_buffer_internal(const std::vector<std::string>& keys,
-                                      const ReadRouteConfig& config) {
+                                      const ReadConfigExt& config) {
     std::vector<std::shared_ptr<BufferHandle>> final_results(keys.size(),
                                                              nullptr);
 
@@ -938,7 +938,7 @@ RealClient::batch_get_buffer_internal(const std::vector<std::string>& keys,
 
 // Implementation of batch_get_buffer method
 std::vector<std::shared_ptr<BufferHandle>> RealClient::batch_get_buffer(
-    const std::vector<std::string>& keys, const ReadRouteConfig& config) {
+    const std::vector<std::string>& keys, const ReadConfigExt& config) {
     return batch_get_buffer_internal(keys, config);
 }
 
@@ -978,7 +978,7 @@ int RealClient::unregister_buffer(void* buffer) {
 
 tl::expected<int64_t, ErrorCode> RealClient::get_into_internal(
     const std::string& key, void* buffer, size_t size,
-    const ReadRouteConfig& config) {
+    const ReadConfigExt& config) {
     // NOTE: The buffer address must be previously registered with
     // register_buffer() for zero-copy RDMA operations to work correctly
     if (!client_service_) {
@@ -990,7 +990,7 @@ tl::expected<int64_t, ErrorCode> RealClient::get_into_internal(
 }
 
 int64_t RealClient::get_into(const std::string& key, void* buffer, size_t size,
-                             const ReadRouteConfig& config) {
+                             const ReadConfigExt& config) {
     return to_py_ret(get_into_internal(key, buffer, size, config));
 }
 
@@ -1173,7 +1173,7 @@ int RealClient::put_from(const std::string& key, void* buffer, size_t size,
 
 std::vector<int64_t> RealClient::batch_get_into(
     const std::vector<std::string>& keys, const std::vector<void*>& buffers,
-    const std::vector<size_t>& sizes, const ReadRouteConfig& config) {
+    const std::vector<size_t>& sizes, const ReadConfigExt& config) {
     auto internal_results =
         batch_get_into_internal(keys, buffers, sizes, config);
     std::vector<int64_t> results;
@@ -1190,7 +1190,7 @@ std::vector<tl::expected<int64_t, ErrorCode>>
 RealClient::batch_get_into_dummy_helper(
     const std::vector<std::string>& keys,
     const std::vector<uint64_t>& dummy_buffers,
-    const std::vector<size_t>& sizes, const ReadRouteConfig& config,
+    const std::vector<size_t>& sizes, const ReadConfigExt& config,
     const UUID& client_id) {
     std::shared_lock<std::shared_mutex> lock(dummy_client_mutex_);
     auto it = shm_contexts_.find(client_id);
@@ -1245,7 +1245,7 @@ std::vector<tl::expected<int64_t, ErrorCode>>
 RealClient::batch_get_into_internal(const std::vector<std::string>& keys,
                                     const std::vector<void*>& buffers,
                                     const std::vector<size_t>& sizes,
-                                    const ReadRouteConfig& config) {
+                                    const ReadConfigExt& config) {
     // Validate preconditions
     if (!client_service_) {
         LOG(ERROR) << "Client is not initialized";
@@ -1405,7 +1405,7 @@ std::vector<int> RealClient::batch_get_into_multi_buffers(
     const std::vector<std::string>& keys,
     const std::vector<std::vector<void*>>& all_buffers,
     const std::vector<std::vector<size_t>>& all_sizes,
-    bool prefer_alloc_in_same_node, const ReadRouteConfig& config) {
+    bool prefer_alloc_in_same_node, const ReadConfigExt& config) {
     auto start = std::chrono::steady_clock::now();
     auto internal_results = batch_get_into_multi_buffers_internal(
         keys, all_buffers, all_sizes, prefer_alloc_in_same_node, config);
@@ -1427,7 +1427,7 @@ RealClient::batch_get_into_multi_buffers_internal(
     const std::vector<std::string>& keys,
     const std::vector<std::vector<void*>>& all_buffers,
     const std::vector<std::vector<size_t>>& all_sizes,
-    bool prefer_alloc_in_same_node, const ReadRouteConfig& config) {
+    bool prefer_alloc_in_same_node, const ReadConfigExt& config) {
     // Validate preconditions
     if (!client_service_) {
         LOG(ERROR) << "Client is not initialized";
