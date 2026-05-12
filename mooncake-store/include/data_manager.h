@@ -197,6 +197,13 @@ class DataManager {
     tl::expected<void, ErrorCode> WriteCommit(std::string_view key,
                                               const UUID& pending_write_token);
 
+    /**
+     * @brief Remove pending write record for key + token (no tier Commit).
+     *        Used when forward TE fails after PreWrite on the peer.
+     */
+    tl::expected<void, ErrorCode> WriteRevoke(std::string_view key,
+                                             const UUID& pending_write_token);
+
     tl::expected<PinKeyResponse, ErrorCode> PinKey(
         std::string_view key, std::optional<UUID> tier_id = std::nullopt);
 
@@ -266,6 +273,8 @@ class DataManager {
         bool enforce_dram_allocation);
     tl::expected<void, ErrorCode> WriteCommitInternal(
         const KeyCtx& ctx, const UUID& pending_write_token);
+    tl::expected<void, ErrorCode> WriteRevokeInternal(
+        const KeyCtx& ctx, const UUID& pending_write_token);
     tl::expected<PinKeyResponse, ErrorCode> PinKeyInternal(
         const KeyCtx& ctx, std::optional<UUID> tier_id);
     tl::expected<void, ErrorCode> UnPinKeyInternal(const KeyCtx& ctx,
@@ -275,8 +284,6 @@ class DataManager {
         const KeyCtx& ctx, const UUID& pending_write_token);
     tl::expected<AllocationHandle, ErrorCode> LookupPinnedKeyHandleInternal(
         const KeyCtx& ctx, const UUID& pin_token);
-    void AbortPendingWriteInternal(const KeyCtx& ctx,
-                                   const UUID& pending_write_token);
 
     std::shared_mutex& GetKeyLock(std::string_view key) {
         size_t hash = std::hash<std::string_view>{}(key);
@@ -490,8 +497,6 @@ class DataManager {
         std::string_view key, const UUID& pending_write_token);
     tl::expected<AllocationHandle, ErrorCode> LookupPinnedKeyHandle(
         std::string_view key, const UUID& pin_token);
-    void AbortPendingWrite(std::string_view key,
-                           const UUID& pending_write_token);
 
    private:
     std::unique_ptr<TieredBackend> tiered_backend_;    // Owned by DataManager
