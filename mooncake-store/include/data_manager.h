@@ -202,7 +202,7 @@ class DataManager {
      *        Used when forward TE fails after PreWrite on the peer.
      */
     tl::expected<void, ErrorCode> WriteRevoke(std::string_view key,
-                                             const UUID& pending_write_token);
+                                              const UUID& pending_write_token);
 
     tl::expected<PinKeyResponse, ErrorCode> PinKey(
         std::string_view key, std::optional<UUID> tier_id = std::nullopt);
@@ -350,8 +350,9 @@ class DataManager {
         const std::vector<RemoteBufferDesc>& remote_buffers,
         Transport::TransferRequest::OpCode opcode);
 
-    tl::expected<std::vector<std::tuple<Transport::BatchID, size_t, std::string>>,
-                 ErrorCode>
+    tl::expected<
+        std::vector<std::tuple<Transport::BatchID, size_t, std::string>>,
+        ErrorCode>
     SubmitTeTransferBatches(void* transfer_ptr, size_t total_data_size,
                             const std::vector<RemoteBufferDesc>& remote_buffers,
                             Transport::TransferRequest::OpCode opcode);

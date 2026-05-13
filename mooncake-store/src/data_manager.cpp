@@ -509,7 +509,8 @@ DataManager::PutViaTe(std::string_view key, std::vector<Slice>& slices) {
         return tl::unexpected(validate_result.error());
     }
 
-    // Local Put: allocation follows tier backend policy (not restricted to DRAM).
+    // Local Put: allocation follows tier backend policy (not restricted to
+    // DRAM).
     auto prewrite_result =
         PreWriteInternal(kctx, total_size, std::nullopt, false);
     if (!prewrite_result) {
@@ -882,8 +883,7 @@ tl::expected<UUID, ErrorCode> DataManager::WriteRemoteData(
 
     // Reverse RDMA path: still one RPC, but internally use the 3-phase write
     // model (PreWrite -> transfer -> WriteCommit). Target tier may be non-DRAM.
-    auto prewrite_result =
-        PreWriteInternal(kctx, total_size, tier_id, false);
+    auto prewrite_result = PreWriteInternal(kctx, total_size, tier_id, false);
     if (!prewrite_result) {
         timer.LogResponse("error_code=", prewrite_result.error());
         return tl::make_unexpected(prewrite_result.error());
@@ -926,10 +926,9 @@ tl::expected<PreWriteResponse, ErrorCode> DataManager::PreWrite(
     return PreWriteInternal(BuildKeyCtx(key), size_bytes, tier_id, true);
 }
 
-tl::expected<PreWriteResponse, ErrorCode>
-DataManager::PreWriteInternal(const KeyCtx& ctx, size_t size_bytes,
-                              std::optional<UUID> tier_id,
-                              bool enforce_dram_allocation) {
+tl::expected<PreWriteResponse, ErrorCode> DataManager::PreWriteInternal(
+    const KeyCtx& ctx, size_t size_bytes, std::optional<UUID> tier_id,
+    bool enforce_dram_allocation) {
     ScopedVLogTimer timer(1, "DataManager::PreWrite");
     timer.LogRequest("key=", ctx.key, "size_bytes=", size_bytes);
 
@@ -963,11 +962,11 @@ DataManager::PreWriteInternal(const KeyCtx& ctx, size_t size_bytes,
 
     auto handle = std::move(handle_result.value());
     // When enforce_dram_allocation is true (RPC PreWrite): only DRAM is wired
-    // for forward TE today; non-DRAM tiers TODO. Local Put / WriteRemoteData use
-    // false and skip this check.
-    if (enforce_dram_allocation &&
-        handle->loc.data.type != MemoryType::DRAM) {
-        timer.LogResponse("error_code=", ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+    // for forward TE today; non-DRAM tiers TODO. Local Put / WriteRemoteData
+    // use false and skip this check.
+    if (enforce_dram_allocation && handle->loc.data.type != MemoryType::DRAM) {
+        timer.LogResponse("error_code=",
+                          ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
         return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
     }
     auto list_it = shard.ordered_list.emplace(shard.ordered_list.end(),
@@ -1075,7 +1074,8 @@ tl::expected<PinKeyResponse, ErrorCode> DataManager::PinKeyInternal(
     RemoveExpiredPinnedKeyLocked(shard, ctx.key_string, now);
     auto record_it = shard.by_key.find(ctx.key_string);
     if (record_it != shard.by_key.end()) {
-        // PinKey forward path: DRAM-only for now; non-DRAM replica handling TODO.
+        // PinKey forward path: DRAM-only for now; non-DRAM replica handling
+        // TODO.
         if (record_it->second.handle->loc.data.type != MemoryType::DRAM) {
             timer.LogResponse("error_code=",
                               ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
@@ -1103,7 +1103,8 @@ tl::expected<PinKeyResponse, ErrorCode> DataManager::PinKeyInternal(
     auto handle = std::move(handle_result.value());
     // PinKey forward path: DRAM-only for now; non-DRAM replica handling TODO.
     if (handle->loc.data.type != MemoryType::DRAM) {
-        timer.LogResponse("error_code=", ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+        timer.LogResponse("error_code=",
+                          ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
         return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
     }
     auto list_it = shard.ordered_list.emplace(shard.ordered_list.end(),
@@ -1275,8 +1276,8 @@ DataManager::SubmitTeTransferInternal(
             std::move(buffer_result.value());
     }
 
-    auto batches_result = SubmitTeTransferBatches(
-        transfer_ptr, total_data_size, remote_buffers, opcode);
+    auto batches_result = SubmitTeTransferBatches(transfer_ptr, total_data_size,
+                                                  remote_buffers, opcode);
     if (!batches_result) {
         return tl::unexpected(batches_result.error());
     }

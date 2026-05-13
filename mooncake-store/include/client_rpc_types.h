@@ -107,7 +107,8 @@ struct WriteCommitRequest {
 
 YLT_REFL(WriteCommitRequest, key, pending_write_token);
 
-/** Drops a pending PreWrite allocation without committing (e.g. after TE failure). */
+/** Drops a pending PreWrite allocation without committing (e.g. after TE
+ * failure). */
 struct WriteRevokeRequest {
     std::string_view key;
     UUID pending_write_token;
