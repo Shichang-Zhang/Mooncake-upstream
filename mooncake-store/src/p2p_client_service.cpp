@@ -1081,7 +1081,7 @@ async_simple::coro::Lazy<void> P2PClientService::RunForwardRemotePut(
             << "Forward RDMA write requires contiguous slice buffers, key="
             << write_req->key;
         tl::expected<void, ErrorCode> err =
-            tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            tl::make_unexpected(ErrorCode::NON_CONTIGUOUS_BUFFER_NOT_SUPPORTED);
         promise->setValue(std::move(err));
         co_return;
     }
@@ -1654,7 +1654,7 @@ async_simple::coro::Lazy<bool> P2PClientService::RunForwardReadOnRoute(
         LOG(ERROR) << "Forward RDMA read requires contiguous dest buffers, key="
                    << req->key;
         tl::expected<void, ErrorCode> err2 =
-            tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            tl::make_unexpected(ErrorCode::NON_CONTIGUOUS_BUFFER_NOT_SUPPORTED);
         promise->setValue(std::move(err2));
         co_return true;
     }
