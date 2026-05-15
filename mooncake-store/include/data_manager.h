@@ -13,6 +13,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <async_simple/coro/Lazy.h>
 #include <ylt/util/tl/expected.hpp>
 #include "async_memcpy_executor.h"
 #include "client_buffer.hpp"
@@ -51,6 +52,11 @@ struct LocalTransferConfig {
     // When mode == MEMCPY, the following parameters are used:
     // 0 means forbid async memcpy (fall back to synchronous).
     size_t local_memcpy_async_worker_num = 32;
+
+    // Dedicated worker threads to offload TransferEngine batch polling
+    // (WaitAllTransferBatches) for local TE Put and remote forward TE paths.
+    // Independent of `mode`. 0 keeps synchronous TE wait on the caller thread.
+    size_t te_async_poll_worker_num = 32;
 };
 
 /**
@@ -211,15 +217,21 @@ class DataManager {
                                            const UUID& pin_token);
 
     /**
-     * @brief TE transfer without tier DRAM staging (PrepareDRAM*).
+     * @brief TE transfer without tier DRAM staging (PrepareDRAM*), with TE
+     * completion polling offloaded when `te_async_poll_worker_num > 0`.
+     *
+     * Returns a Future (not Lazy) so callers co_await a single Future layer;
+     * avoids GCC issues with nested coroutines (`co_return co_await` inside
+     * Lazy) when combined with async_simple.
      *
      * Caller guarantees `local_transfer_base` covers a contiguous layout of
-     * `total_size` bytes that is valid for TransferEngine (typically registered
-     * DRAM). Used by forward RDMA paths where buffers are already TE-ready.
+     * `total_size` bytes valid for TransferEngine (typically registered DRAM).
+     * Used by forward RDMA paths where buffers are already TE-ready.
      *
      * @param opcode WRITE: local -> peer_buffers; READ: peer_buffers -> local
      */
-    tl::expected<void, ErrorCode> TransferWithTeNoTierStaging(
+    async_simple::Future<tl::expected<void, ErrorCode>>
+    TransferWithTeNoTierStagingAsync(
         void* local_transfer_base, size_t total_size,
         const std::vector<RemoteBufferDesc>& peer_buffers,
         Transport::TransferRequest::OpCode opcode);
@@ -348,6 +360,19 @@ class DataManager {
     tl::expected<TeSubmitResult, ErrorCode> SubmitTeTransferInternal(
         const AllocationHandle& handle,
         const std::vector<RemoteBufferDesc>& remote_buffers,
+        Transport::TransferRequest::OpCode opcode);
+
+    tl::expected<std::vector<std::tuple<Transport::BatchID, size_t, std::string>>,
+                 ErrorCode>
+    SubmitTeNoTierStagingBatches(
+        void* local_transfer_base, size_t total_size,
+        const std::vector<RemoteBufferDesc>& peer_buffers,
+        Transport::TransferRequest::OpCode opcode);
+
+    /** Synchronous TE wait on caller thread (used when no poll executor). */
+    tl::expected<void, ErrorCode> TransferWithTeNoTierStaging(
+        void* local_transfer_base, size_t total_size,
+        const std::vector<RemoteBufferDesc>& peer_buffers,
         Transport::TransferRequest::OpCode opcode);
 
     tl::expected<
@@ -517,6 +542,7 @@ class DataManager {
 
     LocalTransferConfig local_transfer_config_;
     std::unique_ptr<AsyncMemcpyExecutor> async_memcpy_executor_;
+    std::unique_ptr<AsyncMemcpyExecutor> te_poll_executor_;
     std::chrono::milliseconds lease_duration_;
     std::chrono::milliseconds lease_scan_interval_;
     std::atomic<bool> lease_scanner_stop_requested_{false};

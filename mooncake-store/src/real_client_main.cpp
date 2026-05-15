@@ -43,6 +43,9 @@ DEFINE_string(p2p_local_transfer_mode, "te",
 DEFINE_uint64(local_memcpy_async_worker_num, 32,
               "If set p2p_local_transfer_mode=memcpy, Worker number for async "
               "local memcpy executor (P2P), 0 means forbid async memcpy");
+DEFINE_uint64(te_async_poll_worker_num, 32,
+              "Worker number for async TE batch polling in DataManager (P2P), "
+              "0 means synchronous TE wait");
 DEFINE_uint32(metrics_port, 9003, "Port for HTTP metrics server");
 DEFINE_bool(enable_metrics_http, true, "Enable HTTP metrics endpoint");
 
@@ -110,7 +113,8 @@ int main(int argc, char* argv[]) {
                 static_cast<uint16_t>(FLAGS_metrics_port),
                 FLAGS_enable_metrics_http, {},  // labels
                 FLAGS_async_sender_thread_count, FLAGS_async_max_batch_size,
-                FLAGS_async_route_queue_size);
+                FLAGS_async_route_queue_size,
+                static_cast<size_t>(FLAGS_te_async_poll_worker_num));
         } else {
             if (FLAGS_deployment_mode != "Centralization") {
                 LOG(WARNING)

@@ -18,12 +18,22 @@
 #include "utils/scoped_vlog_timer.h"
 #include "utils.h"
 
+#include <async_simple/Promise.h>
+
 namespace mooncake {
 
 namespace {
 
 constexpr uint32_t kDefaultLeaseDurationMs = 5000;
 constexpr uint32_t kDefaultLeaseScanIntervalMs = 1000;
+
+async_simple::Future<tl::expected<void, ErrorCode>> MakeReadyExpectedFuture(
+    tl::expected<void, ErrorCode> value) {
+    async_simple::Promise<tl::expected<void, ErrorCode>> promise;
+    auto future = promise.getFuture();
+    promise.setValue(std::move(value));
+    return future;
+}
 
 struct LocalCopyPlan {
     AllocationHandle source_handle;
@@ -148,6 +158,10 @@ DataManager::DataManager(std::unique_ptr<TieredBackend> tiered_backend,
         async_memcpy_executor_ = std::make_unique<AsyncMemcpyExecutor>(
             local_transfer_config_.local_memcpy_async_worker_num);
     }
+    if (local_transfer_config_.te_async_poll_worker_num > 0) {
+        te_poll_executor_ = std::make_unique<AsyncMemcpyExecutor>(
+            local_transfer_config_.te_async_poll_worker_num);
+    }
 
     lease_duration_ = std::chrono::milliseconds(GetEnvOr<uint32_t>(
         "P2P_RPC_LEASE_DURATION_MS", kDefaultLeaseDurationMs));
@@ -162,8 +176,10 @@ DataManager::DataManager(std::unique_ptr<TieredBackend> tiered_backend,
                       ? "TE"
                       : "MEMCPY")
               << ", te_endpoint=" << local_transfer_config_.te_endpoint
-              << ", async_memcpy_workers="
+              << ", memcpy_async_workers="
               << local_transfer_config_.local_memcpy_async_worker_num
+              << ", te_async_poll_workers="
+              << local_transfer_config_.te_async_poll_worker_num
               << ", lease_duration_ms=" << lease_duration_.count()
               << ", lease_scan_interval_ms=" << lease_scan_interval_.count();
 }
@@ -175,6 +191,9 @@ void DataManager::Stop() {
     ClearLeaseRecords();
     if (async_memcpy_executor_) {
         async_memcpy_executor_->Shutdown();
+    }
+    if (te_poll_executor_) {
+        te_poll_executor_->Shutdown();
     }
     if (tiered_backend_) {
         tiered_backend_->Stop();
@@ -485,16 +504,6 @@ tl::expected<std::unique_ptr<TaskHandle<void>>, ErrorCode> DataManager::Put(
     return tl::unexpected(ErrorCode::INTERNAL_ERROR);
 }
 
-// TODO: The returned CallableTaskHandle's WaitAsync() falls back to a
-// synchronous Wait() on the coroutine's current thread, because the
-// WaitAllTransferBatches() is a loop with no async completion notification.
-// Possible optimizations:
-//   (1) run a polling coroutine on yalantinglibs coro_io's io_context (via
-//       co_await coro_io::sleep_for(100us) + getTransferStatus), no new thread;
-//   (2) introduce a lightweight timer service to bridge cv-poll to
-//       async_simple::Promise;
-//   (3) introduce a completion callback from transfer_engine itself.
-// Once any of these lands, switch the return type to FutureHandle.
 tl::expected<std::unique_ptr<TaskHandle<void>>, ErrorCode>
 DataManager::PutViaTe(std::string_view key, std::vector<Slice>& slices) {
     // using Te, treat local memory as remote memory
@@ -536,46 +545,51 @@ DataManager::PutViaTe(std::string_view key, std::vector<Slice>& slices) {
         return tl::unexpected(submit_result.error());
     }
 
-    return CallableTaskHandle<void>::Create(
-        [this, ctx = std::move(*submit_result), alloc_handle, kctx,
-         pending_write_token]() mutable -> tl::expected<void, ErrorCode> {
-            ScopedVLogTimer timer(1, "DataManager::PutViaTe");
-            timer.LogRequest("key=", kctx.key);
+    auto te_phase = [this, ctx = std::move(*submit_result), alloc_handle, kctx,
+                     pending_write_token]() mutable -> tl::expected<void, ErrorCode> {
+        ScopedVLogTimer timer(1, "DataManager::PutViaTe");
+        timer.LogRequest("key=", kctx.key);
 
-            auto wait_result = WaitAllTransferBatches(ctx.transfer_batches);
-            if (!wait_result) {
-                LOG(ERROR) << "WaitAllTransferBatches failed"
+        auto wait_result = WaitAllTransferBatches(ctx.transfer_batches);
+        if (!wait_result) {
+            LOG(ERROR) << "WaitAllTransferBatches failed"
+                       << ", key=" << kctx.key
+                       << ", error_code=" << toString(wait_result.error());
+            (void)WriteRevokeInternal(kctx, pending_write_token);
+            return tl::unexpected(wait_result.error());
+        }
+
+        if (ctx.handle->loc.data.type != MemoryType::DRAM && ctx.temp_buffer) {
+            auto& loc_data = ctx.handle->loc.data;
+            auto copy_result = CopyFromDRAMBuffer(
+                ctx.temp_buffer.get(),
+                reinterpret_cast<void*>(loc_data.buffer->data()),
+                loc_data.type, loc_data.buffer->size(), ctx.handle->backend);
+            if (!copy_result) {
+                LOG(ERROR) << "CopyFromDRAMBuffer failed"
                            << ", key=" << kctx.key
-                           << ", error_code=" << toString(wait_result.error());
+                           << ", error_code=" << toString(copy_result.error());
                 (void)WriteRevokeInternal(kctx, pending_write_token);
-                return tl::unexpected(wait_result.error());
+                return tl::unexpected(copy_result.error());
             }
+        }
 
-            if (ctx.handle->loc.data.type != MemoryType::DRAM &&
-                ctx.temp_buffer) {
-                auto& loc_data = ctx.handle->loc.data;
-                auto copy_result = CopyFromDRAMBuffer(
-                    ctx.temp_buffer.get(),
-                    reinterpret_cast<void*>(loc_data.buffer->data()),
-                    loc_data.type, loc_data.buffer->size(),
-                    ctx.handle->backend);
-                if (!copy_result) {
-                    LOG(ERROR)
-                        << "CopyFromDRAMBuffer failed"
-                        << ", key=" << kctx.key
-                        << ", error_code=" << toString(copy_result.error());
-                    (void)WriteRevokeInternal(kctx, pending_write_token);
-                    return tl::unexpected(copy_result.error());
-                }
-            }
+        auto commit_result = WriteCommitInternal(kctx, pending_write_token);
+        if (!commit_result) {
+            return tl::unexpected(commit_result.error());
+        }
+        timer.LogResponse("error_code=", ErrorCode::OK);
+        return {};
+    };
 
-            auto commit_result = WriteCommitInternal(kctx, pending_write_token);
-            if (!commit_result) {
-                return tl::unexpected(commit_result.error());
-            }
-            timer.LogResponse("error_code=", ErrorCode::OK);
-            return {};
-        });
+    if (te_poll_executor_) {
+        auto future = te_poll_executor_
+                          ->SubmitSingleTask<tl::expected<void, ErrorCode>>(
+                              std::move(te_phase));
+        return FutureHandle<void>::Create(std::shared_ptr<void>{},
+                                          std::move(future));
+    }
+    return CallableTaskHandle<void>::Create(std::move(te_phase));
 }
 
 tl::expected<std::unique_ptr<TaskHandle<void>>, ErrorCode>
@@ -756,19 +770,27 @@ tl::expected<ReadTaskHandle, ErrorCode> DataManager::BuildDataCopierViaTe(
 
     ReadTaskHandle res;
     res.data_size = static_cast<int64_t>(source_size);
-    res.task_handle = CallableTaskHandle<void>::Create(
-        [this, ctx = std::move(submit_result.value()),
-         h = handle]() mutable -> tl::expected<void, ErrorCode> {
-            ScopedVLogTimer timer(1, "DataManager::BuildDataCopierViaTe");
-            auto wait_result = WaitAllTransferBatches(ctx.transfer_batches);
-            if (!wait_result) {
-                LOG(ERROR) << "Failed to wait TE read transfer, error_code="
-                           << wait_result.error();
-                return tl::unexpected(wait_result.error());
-            }
-            timer.LogResponse("error_code=", ErrorCode::OK);
-            return {};
-        });
+    auto te_wait = [this, ctx = std::move(submit_result.value()),
+                    h = handle]() mutable -> tl::expected<void, ErrorCode> {
+        ScopedVLogTimer timer(1, "DataManager::BuildDataCopierViaTe");
+        auto wait_result = WaitAllTransferBatches(ctx.transfer_batches);
+        if (!wait_result) {
+            LOG(ERROR) << "Failed to wait TE read transfer, error_code="
+                       << wait_result.error();
+            return tl::unexpected(wait_result.error());
+        }
+        timer.LogResponse("error_code=", ErrorCode::OK);
+        return {};
+    };
+    if (te_poll_executor_) {
+        auto future = te_poll_executor_
+                          ->SubmitSingleTask<tl::expected<void, ErrorCode>>(
+                              std::move(te_wait));
+        res.task_handle = FutureHandle<void>::Create(std::shared_ptr<void>{},
+                                                     std::move(future));
+    } else {
+        res.task_handle = CallableTaskHandle<void>::Create(std::move(te_wait));
+    }
     return res;
 }
 
@@ -1375,7 +1397,9 @@ DataManager::SubmitTeTransferBatches(
     return submitted_batches;
 }
 
-tl::expected<void, ErrorCode> DataManager::TransferWithTeNoTierStaging(
+tl::expected<std::vector<std::tuple<Transport::BatchID, size_t, std::string>>,
+             ErrorCode>
+DataManager::SubmitTeNoTierStagingBatches(
     void* local_transfer_base, size_t total_size,
     const std::vector<RemoteBufferDesc>& peer_buffers,
     Transport::TransferRequest::OpCode opcode) {
@@ -1394,8 +1418,16 @@ tl::expected<void, ErrorCode> DataManager::TransferWithTeNoTierStaging(
         LOG(ERROR) << "TransferEngine not initialized";
         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
     }
-    auto batches = SubmitTeTransferBatches(local_transfer_base, total_size,
-                                           peer_buffers, opcode);
+    return SubmitTeTransferBatches(local_transfer_base, total_size, peer_buffers,
+                                 opcode);
+}
+
+tl::expected<void, ErrorCode> DataManager::TransferWithTeNoTierStaging(
+    void* local_transfer_base, size_t total_size,
+    const std::vector<RemoteBufferDesc>& peer_buffers,
+    Transport::TransferRequest::OpCode opcode) {
+    auto batches = SubmitTeNoTierStagingBatches(
+        local_transfer_base, total_size, peer_buffers, opcode);
     if (!batches) {
         return tl::unexpected(batches.error());
     }
@@ -1407,6 +1439,28 @@ tl::expected<void, ErrorCode> DataManager::TransferWithTeNoTierStaging(
         return wait_result;
     }
     return {};
+}
+
+async_simple::Future<tl::expected<void, ErrorCode>>
+DataManager::TransferWithTeNoTierStagingAsync(
+    void* local_transfer_base, size_t total_size,
+    const std::vector<RemoteBufferDesc>& peer_buffers,
+    Transport::TransferRequest::OpCode opcode) {
+    if (!te_poll_executor_) {
+        return MakeReadyExpectedFuture(TransferWithTeNoTierStaging(
+            local_transfer_base, total_size, peer_buffers, opcode));
+    }
+    auto batches = SubmitTeNoTierStagingBatches(
+        local_transfer_base, total_size, peer_buffers, opcode);
+    if (!batches) {
+        return MakeReadyExpectedFuture(
+            tl::make_unexpected(batches.error()));
+    }
+    auto batch_vec = std::move(batches.value());
+    return te_poll_executor_->SubmitSingleTask<tl::expected<void, ErrorCode>>(
+        [this, batch_vec = std::move(batch_vec)]() mutable {
+            return WaitAllTransferBatches(batch_vec);
+        });
 }
 
 tl::expected<void, ErrorCode> DataManager::ValidateRemoteBuffers(

@@ -10,6 +10,7 @@
 #include <thread>
 
 #include <async_simple/Try.h>
+#include <async_simple/coro/FutureAwaiter.h>
 #include <async_simple/coro/Lazy.h>
 #include <async_simple/coro/SyncAwait.h>
 
@@ -308,6 +309,8 @@ ErrorCode P2PClientService::InitStorage(const P2PClientConfig& config) {
 
     LocalTransferConfig local_transfer_config;
     local_transfer_config.mode = config.local_transfer_mode;
+    local_transfer_config.te_async_poll_worker_num =
+        config.te_async_poll_worker_num;
     if (config.local_transfer_mode == LocalTransferMode::TE) {
         local_transfer_config.te_endpoint = get_te_endpoint();
     } else {
@@ -952,15 +955,12 @@ auto P2PClientService::BuildWriteOps(std::string_view key,
     return write_ops;
 }
 
-// TODO (TE mode blocking):
-// When local_transfer_mode == TE, data_manager->Put() returns a
-// CallableTaskHandle whose WaitAsync() falls back to the base class synchronous
-// Wait() — there is no true coroutine suspension point.
-// As a result, co_await current_task->WaitAsync() inside RunWriteWithRetry will
-// block the coroutine worker thread for the full duration of the TE transfer
-// instead of yielding it.
-// The retry chain can only advance after that blocking wait returns.
-// See the TODO in DataManager::PutViaTe for planned async improvements.
+// TODO (TE deeper async): DataManager bridges local TE Put to FutureHandle so
+// RunWriteWithRetry can co_await WaitAsync without running TE batch polling on
+// the coroutine worker (see LocalTransferConfig::te_async_poll_worker_num).
+// TransferEngine still completes via blocking getTransferStatus + sleep on
+// worker threads; follow-up is async completion inside TE (callbacks or
+// io-driven polling) instead of that loop.
 std::unique_ptr<TaskHandle<void>> P2PClientService::LocalWriteOp::Dispatch() {
     if (!data_manager) {
         LOG(ERROR) << "Data manager not initialized";
@@ -1103,9 +1103,9 @@ async_simple::coro::Lazy<void> P2PClientService::RunForwardRemotePut(
 
     std::vector<RemoteBufferDesc> dest{pre.value().remote_buffer};
     void* base = slices->front().ptr;
-    auto te =
-        dm->TransferWithTeNoTierStaging(base, TotalSliceBytes(*slices), dest,
-                                        Transport::TransferRequest::WRITE);
+    auto te = co_await dm->TransferWithTeNoTierStagingAsync(
+        base, TotalSliceBytes(*slices), dest,
+        Transport::TransferRequest::WRITE);
     if (!te) {
         LOG(ERROR) << "Forward TE write failed, key=" << write_req->key
                    << ", error=" << te.error();
@@ -1676,7 +1676,7 @@ async_simple::coro::Lazy<bool> P2PClientService::RunForwardReadOnRoute(
     for (const auto& d : req->dest_buffers) {
         total += d.size;
     }
-    auto tr = data_manager_->TransferWithTeNoTierStaging(
+    auto tr = co_await data_manager_->TransferWithTeNoTierStagingAsync(
         base, total, {pin.value().remote_buffer},
         Transport::TransferRequest::READ);
     if (!tr) {

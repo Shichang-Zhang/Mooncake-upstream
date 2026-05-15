@@ -27,6 +27,7 @@ TEST(ClientConfigBuilderTest, BuildP2PClientConfigUsesDefaults) {
     EXPECT_TRUE(config.tiered_backend_config.isMember("tiers"));
     EXPECT_EQ(config.tiered_backend_config["tiers"].size(), 1u);
     EXPECT_EQ(config.local_memcpy_async_worker_num, 32u);
+    EXPECT_EQ(config.te_async_poll_worker_num, 32u);
     EXPECT_EQ(config.local_transfer_mode, LocalTransferMode::TE);
 }
 
@@ -39,6 +40,31 @@ TEST(ClientConfigBuilderTest,
 
     EXPECT_EQ(config.local_memcpy_async_worker_num, 3u);
     EXPECT_EQ(config.local_transfer_mode, LocalTransferMode::MEMCPY);
+    EXPECT_EQ(config.te_async_poll_worker_num, 32u);
+}
+
+// TE mode: last arg sets te_async_poll_worker_num=18; memcpy positional 5 only applies in MEMCPY mode (default 32).
+TEST(ClientConfigBuilderTest, BuildP2PTeModePassesTeAsyncPollWorkerArg) {
+    auto config = ClientConfigBuilder::build_p2p_real_client(
+        "127.0.0.1:12345", "http://127.0.0.1:8080/metadata", "tcp",
+        std::nullopt, "127.0.0.1:50051", kTieredConfigJson, 0, nullptr, "",
+        12345, 2, 1024, 100 * 1024 * 1024, 60 * 1000, "te", 5, 9003, true, {},
+        0, 2000, 0, 18);
+    EXPECT_EQ(config.local_transfer_mode, LocalTransferMode::TE);
+    EXPECT_EQ(config.te_async_poll_worker_num, 18u);
+    EXPECT_EQ(config.local_memcpy_async_worker_num, 32u);
+}
+
+// MEMCPY mode: memcpy positional 5 and last-arg te_async_poll_worker_num=99 both apply.
+TEST(ClientConfigBuilderTest, BuildP2PMemcpyModePassesTeAsyncPollWorkerArg) {
+    auto config = ClientConfigBuilder::build_p2p_real_client(
+        "127.0.0.1:12345", "http://127.0.0.1:8080/metadata", "tcp",
+        std::nullopt, "127.0.0.1:50051", kTieredConfigJson, 0, nullptr, "",
+        12345, 2, 1024, 100 * 1024 * 1024, 60 * 1000, "memcpy", 5, 9003, true,
+        {}, 0, 2000, 0, 99);
+    EXPECT_EQ(config.local_transfer_mode, LocalTransferMode::MEMCPY);
+    EXPECT_EQ(config.local_memcpy_async_worker_num, 5u);
+    EXPECT_EQ(config.te_async_poll_worker_num, 99u);
 }
 
 TEST(ClientConfigBuilderTest, BuildP2PClientConfigRejectsInvalidTransferMode) {

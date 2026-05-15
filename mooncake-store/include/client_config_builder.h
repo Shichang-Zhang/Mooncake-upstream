@@ -171,6 +171,11 @@ struct P2PClientConfig : RealClientConfigBase {
     // When local_transfer_mode == MEMCPY, the following parameter is used:
     // 0 means forbid async memcpy (fall back to synchronous).
     size_t local_memcpy_async_worker_num = 32;
+
+    // Worker threads for offloading TransferEngine batch polling (WaitAllTransferBatches)
+    // in DataManager: local TE Put path and remote forward TE (co_await) paths. Independent
+    // of local_transfer_mode. 0 means synchronous TE wait on the caller/coroutine thread.
+    size_t te_async_poll_worker_num = 32;
 };
 
 // ============================================================================
@@ -238,7 +243,8 @@ class ClientConfigBuilder {
         bool enable_metrics_http = true,
         const std::map<std::string, std::string>& labels = {},
         size_t async_sender_thread_count = 0,
-        size_t async_max_batch_size = 2000, size_t async_route_queue_size = 0) {
+        size_t async_max_batch_size = 2000, size_t async_route_queue_size = 0,
+        size_t te_async_poll_worker_num = 32) {
         P2PClientConfig config;
         fill_real_client_config_base(
             config, local_hostname, metadata_connstring, protocol, rdma_devices,
@@ -251,6 +257,7 @@ class ClientConfigBuilder {
         config.route_cache_ttl_ms = route_cache_ttl_ms;
         config.local_transfer_mode =
             parse_p2p_local_transfer_mode(local_transfer_mode);
+        config.te_async_poll_worker_num = te_async_poll_worker_num;
         if (config.local_transfer_mode == LocalTransferMode::MEMCPY) {
             config.local_memcpy_async_worker_num =
                 local_memcpy_async_worker_num;
