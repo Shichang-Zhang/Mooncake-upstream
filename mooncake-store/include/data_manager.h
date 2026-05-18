@@ -185,6 +185,10 @@ class DataManager {
         std::string_view key,
         const std::vector<RemoteBufferDesc>& dest_buffers);
 
+    async_simple::coro::Lazy<tl::expected<void, ErrorCode>> ReadRemoteDataAsync(
+        std::string_view key,
+        const std::vector<RemoteBufferDesc>& dest_buffers);
+
     /**
      * @brief Write data from remote source buffers
      * @param key Object key to write
@@ -193,6 +197,10 @@ class DataManager {
      * @return UUID of the tier (segment) where data was written, or ErrorCode
      */
     tl::expected<UUID, ErrorCode> WriteRemoteData(
+        std::string_view key, const std::vector<RemoteBufferDesc>& src_buffers,
+        std::optional<UUID> tier_id = std::nullopt);
+
+    async_simple::coro::Lazy<tl::expected<UUID, ErrorCode>> WriteRemoteDataAsync(
         std::string_view key, const std::vector<RemoteBufferDesc>& src_buffers,
         std::optional<UUID> tier_id = std::nullopt);
 
@@ -219,10 +227,6 @@ class DataManager {
     /**
      * @brief TE transfer without tier DRAM staging (PrepareDRAM*), with TE
      * completion polling offloaded when `te_async_poll_worker_num > 0`.
-     *
-     * Returns a Future (not Lazy) so callers co_await a single Future layer;
-     * avoids GCC issues with nested coroutines (`co_return co_await` inside
-     * Lazy) when combined with async_simple.
      *
      * Caller guarantees `local_transfer_base` covers a contiguous layout of
      * `total_size` bytes valid for TransferEngine (typically registered DRAM).
@@ -461,6 +465,9 @@ class DataManager {
     tl::expected<void, ErrorCode> WaitAllTransferBatches(
         const std::vector<std::tuple<Transport::BatchID, size_t, std::string>>&
             batches);
+
+    async_simple::Future<tl::expected<void, ErrorCode>> WaitAllTransferBatchesAsync(
+        std::vector<std::tuple<Transport::BatchID, size_t, std::string>> batches);
 
     // Wait for all tasks to reach a terminal state, then free the batch.
     void CancelBatchTETask(Transport::BatchID batch_id, size_t num_tasks);

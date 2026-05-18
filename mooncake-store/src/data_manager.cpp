@@ -19,6 +19,9 @@
 #include "utils.h"
 
 #include <async_simple/Promise.h>
+#include <async_simple/coro/FutureAwaiter.h>
+#include <async_simple/coro/Lazy.h>
+#include <async_simple/coro/SyncAwait.h>
 
 namespace mooncake {
 
@@ -840,33 +843,8 @@ tl::expected<ReadTaskHandle, ErrorCode> DataManager::BuildDataCopierViaMemcpy(
 
 tl::expected<void, ErrorCode> DataManager::ReadRemoteData(
     std::string_view key, const std::vector<RemoteBufferDesc>& dest_buffers) {
-    ScopedVLogTimer timer(1, "DataManager::ReadRemoteData");
-    timer.LogRequest("key=", key, "buffer_count=", dest_buffers.size());
-
-    auto validate_result = ValidateRemoteBuffers(dest_buffers);
-    if (!validate_result) {
-        LOG(ERROR) << "ReadRemoteData: Buffer validation failed for key: "
-                   << key << ", error: " << toString(validate_result.error());
-        timer.LogResponse("error_code=", validate_result.error());
-        return tl::make_unexpected(validate_result.error());
-    }
-
-    // Reverse RDMA read stays on the direct object-handle path. Only forward
-    // RDMA read uses the 3-phase PinKey -> TE Read -> UnPinKey flow.
-    auto handle_result = tiered_backend_->Get(key);
-    if (!handle_result) {
-        timer.LogResponse("error_code=", handle_result.error());
-        return tl::make_unexpected(handle_result.error());
-    }
-
-    auto transfer_result =
-        TransferDataToRemote(handle_result.value(), dest_buffers);
-    if (!transfer_result) {
-        timer.LogResponse("error_code=", transfer_result.error());
-        return tl::make_unexpected(transfer_result.error());
-    }
-    timer.LogResponse("error_code=", ErrorCode::OK);
-    return {};
+    return async_simple::coro::syncAwait(
+        ReadRemoteDataAsync(key, dest_buffers));
 }
 
 tl::expected<void, ErrorCode> DataManager::TransferDataToRemote(
@@ -876,7 +854,9 @@ tl::expected<void, ErrorCode> DataManager::TransferDataToRemote(
         handle, dest_buffers, Transport::TransferRequest::WRITE);
     if (!submit_result) return tl::unexpected(submit_result.error());
 
-    auto wait_result = WaitAllTransferBatches(submit_result->transfer_batches);
+    auto wait_result = async_simple::coro::syncAwait(
+        WaitAllTransferBatchesAsync(
+            std::move(submit_result->transfer_batches)));
     if (!wait_result) {
         LOG(ERROR) << "TransferDataToRemote: WaitAllTransferBatches failed: "
                    << toString(wait_result.error());
@@ -888,57 +868,8 @@ tl::expected<void, ErrorCode> DataManager::TransferDataToRemote(
 tl::expected<UUID, ErrorCode> DataManager::WriteRemoteData(
     std::string_view key, const std::vector<RemoteBufferDesc>& src_buffers,
     std::optional<UUID> tier_id) {
-    ScopedVLogTimer timer(1, "DataManager::WriteRemoteData");
-    timer.LogRequest("key=", key, "buffer_count=", src_buffers.size());
-    const KeyCtx kctx = BuildKeyCtx(key);
-
-    auto validate_result = ValidateRemoteBuffers(src_buffers);
-    if (!validate_result) {
-        LOG(ERROR) << "WriteRemoteData: Buffer validation failed for key: "
-                   << key << ", error: " << toString(validate_result.error());
-        timer.LogResponse("error_code=", validate_result.error());
-        return tl::make_unexpected(validate_result.error());
-    }
-
-    size_t total_size = 0;
-    for (const auto& buf : src_buffers) total_size += buf.size;
-
-    // Reverse RDMA path: still one RPC, but internally use the 3-phase write
-    // model (PreWrite -> transfer -> WriteCommit). Target tier may be non-DRAM.
-    auto prewrite_result = PreWriteInternal(kctx, total_size, tier_id, false);
-    if (!prewrite_result) {
-        timer.LogResponse("error_code=", prewrite_result.error());
-        return tl::make_unexpected(prewrite_result.error());
-    }
-    const UUID pending_write_token = prewrite_result->pending_write_token;
-
-    auto handle_result =
-        LookupPendingWriteHandleInternal(kctx, pending_write_token);
-    if (!handle_result) {
-        (void)WriteRevokeInternal(kctx, pending_write_token);
-        timer.LogResponse("error_code=", handle_result.error());
-        return tl::make_unexpected(handle_result.error());
-    }
-    AllocationHandle handle = handle_result.value();
-    UUID result_tier_id = handle->loc.tier->GetTierId();
-
-    // Transfer phase — no long key lock held.
-    auto transfer_result = TransferDataFromRemote(handle, src_buffers);
-    if (!transfer_result) {
-        (void)WriteRevokeInternal(kctx, pending_write_token);
-        timer.LogResponse("error_code=", transfer_result.error());
-        return tl::make_unexpected(transfer_result.error());
-    }
-
-    auto commit_result = WriteCommitInternal(kctx, pending_write_token);
-    if (!commit_result) {
-        timer.LogResponse("error_code=", commit_result.error());
-        return tl::make_unexpected(commit_result.error());
-    }
-
-    timer.LogResponse("error_code=", ErrorCode::OK,
-                      "transferred_bytes=", total_size);
-    return result_tier_id;
+    return async_simple::coro::syncAwait(
+        WriteRemoteDataAsync(key, src_buffers, tier_id));
 }
 
 tl::expected<PreWriteResponse, ErrorCode> DataManager::PreWrite(
@@ -1204,7 +1135,9 @@ tl::expected<void, ErrorCode> DataManager::TransferDataFromRemote(
         handle, src_buffers, Transport::TransferRequest::READ);
     if (!submit_result) return tl::unexpected(submit_result.error());
 
-    auto wait_result = WaitAllTransferBatches(submit_result->transfer_batches);
+    auto wait_result = async_simple::coro::syncAwait(
+        WaitAllTransferBatchesAsync(
+            std::move(submit_result->transfer_batches)));
     if (!wait_result) {
         LOG(ERROR) << "TransferDataFromRemote: WaitAllTransferBatches failed: "
                    << toString(wait_result.error());
@@ -1627,6 +1560,140 @@ tl::expected<void, ErrorCode> DataManager::WaitAllTransferBatches(
     }
 
     return {};
+}
+
+async_simple::Future<tl::expected<void, ErrorCode>>
+DataManager::WaitAllTransferBatchesAsync(
+    std::vector<std::tuple<Transport::BatchID, size_t, std::string>> batches) {
+    if (!te_poll_executor_) {
+        return MakeReadyExpectedFuture(WaitAllTransferBatches(batches));
+    }
+    return te_poll_executor_->SubmitSingleTask<tl::expected<void, ErrorCode>>(
+        [this, batches = std::move(batches)]() mutable {
+            return WaitAllTransferBatches(batches);
+        });
+}
+
+async_simple::coro::Lazy<tl::expected<void, ErrorCode>>
+DataManager::ReadRemoteDataAsync(
+    std::string_view key, const std::vector<RemoteBufferDesc>& dest_buffers) {
+    ScopedVLogTimer timer(1, "DataManager::ReadRemoteData");
+    timer.LogRequest("key=", key, "buffer_count=", dest_buffers.size());
+
+    auto validate_result = ValidateRemoteBuffers(dest_buffers);
+    if (!validate_result) {
+        LOG(ERROR) << "ReadRemoteData: Buffer validation failed for key: "
+                   << key << ", error: " << toString(validate_result.error());
+        timer.LogResponse("error_code=", validate_result.error());
+        co_return tl::make_unexpected(validate_result.error());
+    }
+
+    auto handle_result = tiered_backend_->Get(key);
+    if (!handle_result) {
+        timer.LogResponse("error_code=", handle_result.error());
+        co_return tl::make_unexpected(handle_result.error());
+    }
+
+    auto submit_result = SubmitTeTransferInternal(
+        handle_result.value(), dest_buffers, Transport::TransferRequest::WRITE);
+    if (!submit_result) {
+        timer.LogResponse("error_code=", submit_result.error());
+        co_return tl::make_unexpected(submit_result.error());
+    }
+
+    auto wait_fut = WaitAllTransferBatchesAsync(
+        std::move(submit_result->transfer_batches));
+    auto wait_res = co_await std::move(wait_fut);
+    if (!wait_res) {
+        timer.LogResponse("error_code=", wait_res.error());
+        co_return wait_res;
+    }
+    timer.LogResponse("error_code=", ErrorCode::OK);
+    co_return tl::expected<void, ErrorCode>{};
+}
+
+async_simple::coro::Lazy<tl::expected<UUID, ErrorCode>>
+DataManager::WriteRemoteDataAsync(
+    std::string_view key, const std::vector<RemoteBufferDesc>& src_buffers,
+    std::optional<UUID> tier_id) {
+    ScopedVLogTimer timer(1, "DataManager::WriteRemoteData");
+    timer.LogRequest("key=", key, "buffer_count=", src_buffers.size());
+    const KeyCtx kctx = BuildKeyCtx(key);
+
+    auto validate_result = ValidateRemoteBuffers(src_buffers);
+    if (!validate_result) {
+        LOG(ERROR) << "WriteRemoteData: Buffer validation failed for key: "
+                   << key << ", error: " << toString(validate_result.error());
+        timer.LogResponse("error_code=", validate_result.error());
+        co_return tl::make_unexpected(validate_result.error());
+    }
+
+    size_t total_size = 0;
+    for (const auto& buf : src_buffers) total_size += buf.size;
+
+    auto prewrite_result = PreWriteInternal(kctx, total_size, tier_id, false);
+    if (!prewrite_result) {
+        timer.LogResponse("error_code=", prewrite_result.error());
+        co_return tl::make_unexpected(prewrite_result.error());
+    }
+    const UUID pending_write_token = prewrite_result->pending_write_token;
+
+    auto handle_result =
+        LookupPendingWriteHandleInternal(kctx, pending_write_token);
+    if (!handle_result) {
+        (void)WriteRevokeInternal(kctx, pending_write_token);
+        timer.LogResponse("error_code=", handle_result.error());
+        co_return tl::make_unexpected(handle_result.error());
+    }
+    AllocationHandle handle = handle_result.value();
+    UUID result_tier_id = handle->loc.tier->GetTierId();
+
+    auto submit_result = SubmitTeTransferInternal(
+        handle, src_buffers, Transport::TransferRequest::READ);
+    if (!submit_result) {
+        (void)WriteRevokeInternal(kctx, pending_write_token);
+        timer.LogResponse("error_code=", submit_result.error());
+        co_return tl::make_unexpected(submit_result.error());
+    }
+
+    auto wait_fut = WaitAllTransferBatchesAsync(
+        std::move(submit_result->transfer_batches));
+    auto wait_res = co_await std::move(wait_fut);
+    if (!wait_res) {
+        (void)WriteRevokeInternal(kctx, pending_write_token);
+        timer.LogResponse("error_code=", wait_res.error());
+        co_return tl::make_unexpected(wait_res.error());
+    }
+
+    if (submit_result->handle->loc.data.type != MemoryType::DRAM &&
+        submit_result->temp_buffer) {
+        auto& loc_data = submit_result->handle->loc.data;
+        void* local_ptr = reinterpret_cast<void*>(loc_data.buffer->data());
+        MemoryType local_type = loc_data.type;
+        size_t copy_total_size = loc_data.buffer->size();
+        auto backend = submit_result->handle->backend;
+
+        auto copy_result = CopyFromDRAMBuffer(
+            submit_result->temp_buffer.get(), local_ptr, local_type,
+            copy_total_size, backend);
+        if (!copy_result.has_value()) {
+            LOG(ERROR)
+                << "WriteRemoteData: Failed to copy from temp DRAM buffer to "
+                   "destination tier";
+            (void)WriteRevokeInternal(kctx, pending_write_token);
+            co_return tl::make_unexpected(copy_result.error());
+        }
+    }
+
+    auto commit_result = WriteCommitInternal(kctx, pending_write_token);
+    if (!commit_result) {
+        timer.LogResponse("error_code=", commit_result.error());
+        co_return tl::make_unexpected(commit_result.error());
+    }
+
+    timer.LogResponse("error_code=", ErrorCode::OK,
+                      "transferred_bytes=", total_size);
+    co_return result_tier_id;
 }
 
 tl::expected<void, ErrorCode> DataManager::WaitTransferBatch(

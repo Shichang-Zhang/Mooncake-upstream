@@ -1,8 +1,11 @@
 #include "client_rpc_service.h"
 
 #include <utility>
+#include <coroutine>
 
 #include <glog/logging.h>
+#include <async_simple/coro/FutureAwaiter.h>
+#include <async_simple/coro/Lazy.h>
 #include <ylt/coro_rpc/coro_rpc_server.hpp>
 #include "utils/scoped_vlog_timer.h"
 
@@ -104,8 +107,8 @@ ClientRpcService::ClientRpcService(DataManager& data_manager,
                                    P2PClientMetric* metrics)
     : data_manager_(data_manager), metrics_(metrics) {}
 
-tl::expected<void, ErrorCode> ClientRpcService::ReadRemoteData(
-    const RemoteReadRequest& request) {
+async_simple::coro::Lazy<tl::expected<void, ErrorCode>>
+ClientRpcService::ReadRemoteData(const RemoteReadRequest& request) {
     ScopedVLogTimer timer(1, "ClientRpcService::ReadRemoteData");
     timer.LogRequest("key=", request.key,
                      "buffer_count=", request.dest_buffers.size());
@@ -121,12 +124,12 @@ tl::expected<void, ErrorCode> ClientRpcService::ReadRemoteData(
             metrics_->peer_request.get_failures.inc();
             metrics_->peer_request.get_latency_failure.observe(sw.elapsed_us());
         }
-        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+        co_return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
 
-    // Delegate to DataManager
-    auto result =
-        data_manager_.ReadRemoteData(request.key, request.dest_buffers);
+    auto dm_lazy = data_manager_.ReadRemoteDataAsync(request.key,
+                                                     request.dest_buffers);
+    auto result = co_await std::move(dm_lazy);
 
     if (!result.has_value()) {
         LOG(ERROR) << "ReadRemoteData failed for key: " << request.key
@@ -143,10 +146,9 @@ tl::expected<void, ErrorCode> ClientRpcService::ReadRemoteData(
             }
             metrics_->peer_request.get_latency_failure.observe(sw.elapsed_us());
         }
-        return result;
+        co_return result;
     }
 
-    // Record successful get: hits + bytes + latency
     if (metrics_) {
         metrics_->peer_request.get_hits.inc();
         metrics_->peer_request.get_bytes.inc(
@@ -155,11 +157,11 @@ tl::expected<void, ErrorCode> ClientRpcService::ReadRemoteData(
     }
 
     timer.LogResponse("error_code=", ErrorCode::OK);
-    return {};
+    co_return result;
 }
 
-tl::expected<UUID, ErrorCode> ClientRpcService::WriteRemoteData(
-    const RemoteWriteRequest& request) {
+async_simple::coro::Lazy<tl::expected<UUID, ErrorCode>>
+ClientRpcService::WriteRemoteData(const RemoteWriteRequest& request) {
     ScopedVLogTimer timer(1, "ClientRpcService::WriteRemoteData");
     timer.LogRequest("key=", request.key,
                      "buffer_count=", request.src_buffers.size());
@@ -175,12 +177,12 @@ tl::expected<UUID, ErrorCode> ClientRpcService::WriteRemoteData(
             metrics_->peer_request.put_failures.inc();
             metrics_->peer_request.put_latency_failure.observe(sw.elapsed_us());
         }
-        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+        co_return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
 
-    // Delegate to DataManager
-    auto result = data_manager_.WriteRemoteData(
+    auto dm_lazy = data_manager_.WriteRemoteDataAsync(
         request.key, request.src_buffers, request.target_tier_id);
+    auto result = co_await std::move(dm_lazy);
 
     if (!result.has_value()) {
         LOG(ERROR) << "WriteRemoteData failed for key: " << request.key
@@ -190,10 +192,9 @@ tl::expected<UUID, ErrorCode> ClientRpcService::WriteRemoteData(
             metrics_->peer_request.put_failures.inc();
             metrics_->peer_request.put_latency_failure.observe(sw.elapsed_us());
         }
-        return result;
+        co_return result;
     }
 
-    // Record successful put: bytes + latency
     if (metrics_) {
         metrics_->peer_request.put_bytes.inc(
             CalculateBufferSize(request.src_buffers));
@@ -201,7 +202,7 @@ tl::expected<UUID, ErrorCode> ClientRpcService::WriteRemoteData(
     }
 
     timer.LogResponse("error_code=", ErrorCode::OK);
-    return result;
+    co_return result;
 }
 
 tl::expected<PreWriteResponse, ErrorCode> ClientRpcService::PreWrite(

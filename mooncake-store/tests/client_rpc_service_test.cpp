@@ -12,6 +12,7 @@
 #include "utils/common.h"
 #include "transfer_engine.h"
 #include "types.h"
+#include <async_simple/coro/SyncAwait.h>
 
 namespace mooncake {
 
@@ -142,7 +143,8 @@ TEST_F(ClientRpcServiceTest, ReadRemoteDataSuccess) {
 
     // ReadRemoteData will fail because TransferEngine is not fully initialized
     // (no metadata connection). This is expected in unit test environment.
-    auto result = rpc_service_->ReadRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->ReadRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::INTERNAL_ERROR);
 }
@@ -154,7 +156,8 @@ TEST_F(ClientRpcServiceTest, ReadRemoteDataEmptyKey) {
     request.dest_buffers.push_back(
         CreateBufferDesc("test_segment", 0x1000, 100));
 
-    auto result = rpc_service_->ReadRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->ReadRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::INVALID_PARAMS);
 }
@@ -165,7 +168,8 @@ TEST_F(ClientRpcServiceTest, ReadRemoteDataEmptyBuffers) {
     request.key = "test_key";
     // Empty dest_buffers
 
-    auto result = rpc_service_->ReadRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->ReadRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::INVALID_PARAMS);
 }
@@ -177,7 +181,8 @@ TEST_F(ClientRpcServiceTest, ReadRemoteDataInvalidBufferZeroSize) {
     request.dest_buffers.push_back(
         CreateBufferDesc("test_segment", 0x1000, 0));  // Zero size
 
-    auto result = rpc_service_->ReadRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->ReadRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::INVALID_PARAMS);
 }
@@ -189,7 +194,8 @@ TEST_F(ClientRpcServiceTest, ReadRemoteDataInvalidBufferNullAddr) {
     request.dest_buffers.push_back(
         CreateBufferDesc("test_segment", 0, 100));  // Null address
 
-    auto result = rpc_service_->ReadRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->ReadRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::INVALID_PARAMS);
 }
@@ -201,7 +207,8 @@ TEST_F(ClientRpcServiceTest, ReadRemoteDataKeyNotFound) {
     request.dest_buffers.push_back(
         CreateBufferDesc("test_segment", 0x1000, 100));
 
-    auto result = rpc_service_->ReadRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->ReadRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::OBJECT_NOT_FOUND);
 }
@@ -400,7 +407,8 @@ TEST_F(ClientRpcServiceTest, WriteRemoteDataSuccess) {
 
     // WriteRemoteData will fail because TransferEngine is not fully initialized
     // (no metadata connection). This is expected in unit test environment.
-    auto result = rpc_service_->WriteRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->WriteRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::INTERNAL_ERROR);
 }
@@ -412,7 +420,8 @@ TEST_F(ClientRpcServiceTest, WriteRemoteDataEmptyKey) {
     request.src_buffers.push_back(
         CreateBufferDesc("test_segment", 0x1000, 100));
 
-    auto result = rpc_service_->WriteRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->WriteRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::INVALID_PARAMS);
 }
@@ -423,7 +432,8 @@ TEST_F(ClientRpcServiceTest, WriteRemoteDataEmptyBuffers) {
     request.key = "test_key";
     // Empty src_buffers
 
-    auto result = rpc_service_->WriteRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->WriteRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::INVALID_PARAMS);
 }
@@ -435,7 +445,8 @@ TEST_F(ClientRpcServiceTest, WriteRemoteDataInvalidBufferZeroSize) {
     request.src_buffers.push_back(
         CreateBufferDesc("test_segment", 0x1000, 0));  // Zero size
 
-    auto result = rpc_service_->WriteRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->WriteRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::INVALID_PARAMS);
 }
@@ -447,7 +458,8 @@ TEST_F(ClientRpcServiceTest, WriteRemoteDataInvalidBufferNullAddr) {
     request.src_buffers.push_back(
         CreateBufferDesc("test_segment", 0, 100));  // Null address
 
-    auto result = rpc_service_->WriteRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->WriteRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::INVALID_PARAMS);
 }
@@ -465,7 +477,8 @@ TEST_F(ClientRpcServiceTest, WriteRemoteDataWithTierId) {
     request.target_tier_id = tier_id;
 
     // Will fail because TransferEngine is not fully initialized
-    auto result = rpc_service_->WriteRemoteData(request);
+    auto result = async_simple::coro::syncAwait(
+        rpc_service_->WriteRemoteData(request));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ErrorCode::INTERNAL_ERROR);
 }

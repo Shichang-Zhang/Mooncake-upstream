@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <async_simple/coro/Lazy.h>
 #include <ylt/util/tl/expected.hpp>
 #include "client_rpc_types.h"
 #include "data_manager.h"
@@ -38,11 +39,11 @@ class ClientRpcService {
      * @return ErrorCode indicating success or failure
      *
      * Flow:
-     * 1. DataManager.ReadRemoteData(key, dest_buffers)
+     * 1. DataManager.ReadRemoteDataAsync(key, dest_buffers) (TE wait may yield)
      * 2. TieredBackend.Get(key) → handle
      * 3. TransferEngine.submitTransfer(WRITE) to transfer data from B to A
      */
-    tl::expected<void, ErrorCode> ReadRemoteData(
+    async_simple::coro::Lazy<tl::expected<void, ErrorCode>> ReadRemoteData(
         const RemoteReadRequest& request);
 
     /**
@@ -52,7 +53,7 @@ class ClientRpcService {
      * @return UUID containing the route descriptor of the
      *         written replica, or ErrorCode
      */
-    tl::expected<UUID, ErrorCode> WriteRemoteData(
+    async_simple::coro::Lazy<tl::expected<UUID, ErrorCode>> WriteRemoteData(
         const RemoteWriteRequest& request);
 
     tl::expected<PreWriteResponse, ErrorCode> PreWrite(
